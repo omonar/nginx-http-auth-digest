@@ -1,0 +1,111 @@
+Nginx Digest Authentication Module
+--
+
+Description:
+--
+
+Digest authentication module as described in RFC2617.
+
+No support for "auth-int" type of quality of protection.
+
+Installation:
+--
+
+You'll need to re-compile Nginx from source to include this module.
+Modify your compile of Nginx by adding the following directive
+(modified to suit your path of course):
+
+./configure --add-module=/absolute/path/to/nginx-http-auth-digest
+make
+make install
+
+Example configuration:
+--
+
+http {
+    auth_digest_zone zone=nonces:10m;
+
+    ...
+
+    server {
+
+        ...
+
+        auth_digest_user_file /etc/nginx/test.digest;
+        auth_digest_secret_key 0123456789abcdef;
+
+        auth_digest_algorithm MD5-sess;
+
+        location / {
+                auth_digest 'test' zone=nonces replays=20 expires=10;
+        }
+
+
+Directives:
+--
+
+Syntax:  auth_digest realm zone=name replays=number expires=number
+Default: auth_digest off zone=name replays=512 expires=300
+Context: http, server, location
+
+Enables validation of user name and password using the "HTTP Digest Authentication"
+protocol. The specified parameter is used as realm. Realm can contain variables.
+The special value off allows cancelling the effect of the auth_digest directive
+inherited from the previous configuration level. Each validation expires after
+time in seconds specified by parameter expires or number of requests specified
+by parameter replays.
+
+Syntax:  auth_digest_algorithm MD5 | MD5-sess
+Default: auth_digest_algorithm MD5
+Context: http, server, location
+
+Sets the algorithm to be used during digest generation.
+
+Syntax:  auth_digest_zone zone=name:size
+Default: --
+Context: http
+
+Sets parameters for a shared memory zone that will keep states for various nonces.
+In particular, the state includes the current number of uses of a given nonce.
+
+The stored state always occupies 64 bytes of memory. One megabyte zone can keep
+about 16 thousand 64-byte states. If the zone storage is exhausted, the server
+will return the 503 (Service Temporarily Unavailable) error to all further requests.
+
+Syntax:  auth_digest_secret_key key
+Default: --
+Context: http, server, location
+
+Sets a secret key for nonce generation and verification. The key can contain text,
+variables, and their combination. If secret key is not provided than a random key
+is generated when nginx starts.
+
+Syntax:  auth_digest_user_file file
+Default: --
+Context: http, server, location
+
+Specifies a file that keeps user names, realms, and md5 hash of a string username:realm:password
+in the following format:
+
+# comment
+name1:realm1:md5hash(name1:realm1:password1)
+name2:realm2:md5hash(name2:realm2:password2)
+name3:realm2:md5hash(name3:realm3:password3)
+
+Use attached perl script htdigest.py writen by Christian Swinehart to generate the file.
+
+Embedded variables:
+--
+
+$auth_digest_user
+
+The username used by a remote client.
+
+
+Contributing:
+--
+
+Git source repositories:
+http://github.com/omonar/nginx-http-auth-digest/tree/master
+
+Please feel free to fork the project at GitHub and submit pull requests or patches.
