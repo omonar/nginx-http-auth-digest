@@ -1191,7 +1191,7 @@ ngx_http_auth_digest_crypt_handler(ngx_http_request_t *r,
                    "auth digest: Nonce with ident \"%08xT:%08xi\" server's counter value: %d",
                    nonce.expires, nonce.unique, lc->last);
     /*
-     * Requests may arrive out-of-order. Check sequence of seen nounde counters with
+     * Requests may arrive out-of-order. Check sequence of seen nonce counters with
      * anti-replay window method as proposed in RFC6479
      */
 
@@ -1199,7 +1199,7 @@ ngx_http_auth_digest_crypt_handler(ngx_http_request_t *r,
     ngx_http_auth_digest_arbv_status(r, lc->arbv);
 #endif
 
-    /* Too old nounce counter value */
+    /* Too old nonce counter value */
     if (auth->ncbinary + NGX_HTTP_AUTH_DGST_ARBV_LEN < lc->last)
     {
         /* Something could be wrong: Replay-attack? */
@@ -1209,7 +1209,7 @@ ngx_http_auth_digest_crypt_handler(ngx_http_request_t *r,
         return ngx_http_auth_digest_set_challenge(r, adcf, realm, 0);
     }
 
-    /* New nounce conter value */
+    /* New nonce counter value */
     if (auth->ncbinary > lc->last) {
 
         i = (lc->last - 1) / NGX_HTTP_AUTH_DGST_ARBV_ELT;
@@ -1232,10 +1232,10 @@ ngx_http_auth_digest_crypt_handler(ngx_http_request_t *r,
     ngx_http_auth_digest_arbv_status(r, lc->arbv);
 #endif
 
-    /* Nounce counter is within anti-replay window */
+    /* Nonce counter is within anti-replay window */
     if (ngx_http_auth_digest_bitvector_get(lc->arbv, auth->ncbinary - 1) != 0)
     {
-        /* Already seen nounce counter. Replay-attack */
+        /* Already seen nonce counter. Replay-attack */
         ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
                       "Replayed request");
 
