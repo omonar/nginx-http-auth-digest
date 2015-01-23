@@ -677,7 +677,7 @@ ngx_http_auth_digest_credentials(ngx_http_request_t *r,
     if (auth->username.len == 0 || auth->realm.len == 0
         || auth->uri.len == 0 || auth->cnonce.len == 0
         || auth->nonce.len == 0
-        /* Older Android versions use only 6 bytes long nonces */
+        /* Older Android versions use only 6 hexadecimal digits long counter */
         || (auth->nc.len != 8 && auth->nc.len != 6)
         || auth->response.len != 2*NGX_HTTP_AUTH_DGST_MD5_SIZE)
     {
