@@ -76,8 +76,8 @@ Syntax:  auth_digest_secret_key key
 Default: --
 Context: http, server, location
 
-Sets a secret key for nonce generation and verification. The key can contain text,
-variables, and their combination. If secret key is not provided than a random key
+Sets a secret key for nonce generation and verification. For reasonable protection,
+secret should be a string of 22 characters. If secret key is not provided than a random key
 is generated when nginx starts.
 
 Syntax:  auth_digest_user_file file

@@ -75,8 +75,8 @@
 
 #endif
 
-#define NGX_HTTP_AUTH_DGST_MD5        0
-#define NGX_HTTP_AUTH_DGST_MD5SESS    1
+#define NGX_HTTP_AUTH_DGST_MD5        1
+#define NGX_HTTP_AUTH_DGST_MD5SESS    2
 
 #define NGX_HTTP_AUTH_DGST_MD5_SIZE   16
 #define NGX_HTTP_AUTH_DGST_BUF_SIZE   2048
@@ -84,6 +84,9 @@
 /* Default parameters */
 #define NGX_HTTP_AUTH_DGST_REPLAYS    512
 #define NGX_HTTP_AUTH_DGST_EXPIRES    300
+
+#define NGX_HTTP_AUTH_DGST_KEY_SIZE   NGX_HTTP_AUTH_DGST_MD5_SIZE
+#define NGX_HTTP_AUTH_DGST_MAC_SIZE   NGX_HTTP_AUTH_DGST_MD5_SIZE
 
 /* Anti-replay window */
 #define NGX_HTTP_AUTH_DGST_ARBV_ELT   8
@@ -133,7 +136,7 @@ typedef struct {
 typedef struct {
     time_t                         expires;
     ngx_uint_t                     unique;
-    u_char                         hmac[NGX_HTTP_AUTH_DGST_MD5_SIZE];
+    u_char                         hmac[NGX_HTTP_AUTH_DGST_MAC_SIZE];
 } ngx_http_auth_digest_nonce_t;
 
 
@@ -163,7 +166,7 @@ typedef struct {
     ngx_uint_t                     replays;
     ngx_uint_t                     algorithm;
     ngx_http_complex_value_t       realm;
-    ngx_http_complex_value_t       secret_key;
+    ngx_str_t                      secret_key;
     ngx_http_complex_value_t       user_file;
 } ngx_http_auth_digest_conf_t;
 
@@ -1330,19 +1333,12 @@ ngx_http_auth_digest_set_challenge(ngx_http_request_t *r, ngx_http_auth_digest_c
 {
     size_t                         len;
     u_char                        *challenge, *last;
-    ngx_str_t                      algorithm, secret_key;
+    ngx_str_t                      algorithm;
 
     r->headers_out.www_authenticate = ngx_list_push(&r->headers_out.headers);
     if (r->headers_out.www_authenticate == NULL) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
-
-    if (ngx_http_complex_value(r, &adcf->secret_key, &secret_key) != NGX_OK) {
-        return NGX_HTTP_INTERNAL_SERVER_ERROR;
-    }
-
-    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-            "auth digest: Nonce secret: \"%V\"", &secret_key);
 
     len = sizeof("Digest realm=\"\", nonce=\"\", qop=\"auth\"") - 1;
 
@@ -1372,7 +1368,7 @@ ngx_http_auth_digest_set_challenge(ngx_http_request_t *r, ngx_http_auth_digest_c
     *last++ = '\"';
 
     last = ngx_cpystrn(last, (u_char *) ", nonce=\"", sizeof(", nonce=\""));
-    last = (u_char *) ngx_http_auth_digest_generate_nonce(r, last, &secret_key, adcf->expires);
+    last = (u_char *) ngx_http_auth_digest_generate_nonce(r, last, &adcf->secret_key, adcf->expires);
     *last++ = '\"';
 
     last = ngx_cpystrn(last, (u_char *) ", qop=\"auth\"", sizeof(", qop=\"auth\""));
@@ -1406,19 +1402,11 @@ ngx_http_auth_digest_set_authinfo(ngx_http_request_t *r, ngx_http_auth_digest_co
 {
     size_t      len;
     u_char     *authinfo, *last;
-    ngx_str_t   secret_key;
 
     r->headers_out.www_authenticate = ngx_list_push(&r->headers_out.headers);
     if (r->headers_out.www_authenticate == NULL) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
-
-    if (ngx_http_complex_value(r, &adcf->secret_key, &secret_key) != NGX_OK) {
-        return NGX_HTTP_INTERNAL_SERVER_ERROR;
-    }
-
-    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-            "auth digest: Nonce secret: \"%V\"", &secret_key);
 
     len = sizeof("nextnonce=\"\", qop=auth, rspauth=\"\", cnonce=\"\", nc=") - 1
         + auth->nonce.len + auth->cnonce.len + auth->nc.len
@@ -1432,7 +1420,7 @@ ngx_http_auth_digest_set_authinfo(ngx_http_request_t *r, ngx_http_auth_digest_co
     last = ngx_cpystrn(authinfo, (u_char *) "nextnonce=\"", sizeof("nextnonce=\""));
 
     if (nextnonce == 1) {
-        last = (u_char *) ngx_http_auth_digest_generate_nonce(r, last, &secret_key, adcf->expires);
+        last = (u_char *) ngx_http_auth_digest_generate_nonce(r, last, &adcf->secret_key, adcf->expires);
     } else {
         last = ngx_cpystrn(last, auth->nonce.data, auth->nonce.len + 1);
     }
@@ -1472,8 +1460,11 @@ static uintptr_t
 ngx_http_auth_digest_generate_nonce(ngx_http_request_t *r, u_char *dst,
     ngx_str_t *secret_key, time_t expires)
 {
-    ngx_str_t                      message, binary, base64;
-    ngx_http_auth_digest_nonce_t   nonce;
+    ngx_str_t                     message, binary, base64;
+    ngx_http_auth_digest_nonce_t  nonce;
+#if (NGX_DEBUG)
+    u_char                        key[2*NGX_HTTP_AUTH_DGST_KEY_SIZE + 1];
+#endif
 
     binary.len = sizeof(ngx_http_auth_digest_nonce_t);
     binary.data = (u_char *) &nonce;
@@ -1483,6 +1474,15 @@ ngx_http_auth_digest_generate_nonce(ngx_http_request_t *r, u_char *dst,
     if (dst == NULL) {
         return (uintptr_t) base64.len;
     }
+
+#if (NGX_DEBUG)
+    ngx_hex_dump(key, secret_key->data, NGX_HTTP_AUTH_DGST_KEY_SIZE);
+
+    key[2*NGX_HTTP_AUTH_DGST_KEY_SIZE] = '\0';
+#endif
+
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+            "auth digest: Nonce secret: \"%s\"", key);
 
     nonce.unique  = ngx_random();
 
@@ -1519,22 +1519,24 @@ ngx_http_auth_digest_verify_nonce(ngx_http_request_t *r, ngx_http_auth_digest_co
     ngx_http_auth_digest_auth_t *auth, ngx_http_auth_digest_nonce_t *nonce)
 {
     ngx_int_t                     n, rc;
-    ngx_str_t                     message, base64, binary, secret_key;
+    ngx_str_t                     message, base64, binary;
     u_char                        ch;
     ngx_http_auth_digest_nonce_t  value;
 #if (NGX_DEBUG)
     u_char                        buf[2*sizeof(ngx_http_auth_digest_nonce_t)];
+    u_char                        key[2*NGX_HTTP_AUTH_DGST_KEY_SIZE + 1];
 #endif
 
     ngx_memset(nonce, 0, sizeof(ngx_http_auth_digest_nonce_t));
 
-    rc = ngx_http_complex_value(r, &adcf->secret_key, &secret_key);
-    if (rc != NGX_OK) {
-        return NGX_ERROR;
-    }
+#if (NGX_DEBUG)
+    ngx_hex_dump(key, adcf->secret_key.data, NGX_HTTP_AUTH_DGST_KEY_SIZE);
+
+    key[2*NGX_HTTP_AUTH_DGST_KEY_SIZE] = '\0';
+#endif
 
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-            "auth digest: Nonce secret: \"%V\"", &secret_key);
+            "auth digest: Nonce secret: \"%s\"", key);
 
     base64.len = ngx_http_auth_digest_generate_nonce(NULL, NULL, NULL, 0);
 
@@ -1559,7 +1561,7 @@ ngx_http_auth_digest_verify_nonce(ngx_http_request_t *r, ngx_http_auth_digest_co
             "auth digest: Nonce ident:  \"%08xT:%08xi\"",
             value.expires, value.unique);
 
-    ngx_http_auth_digest_calculate_hmac(value.hmac, &message, &secret_key);
+    ngx_http_auth_digest_calculate_hmac(value.hmac, &message, &adcf->secret_key);
 
 #if (NGX_DEBUG)
     binary.data = (u_char *) &value;
@@ -1576,7 +1578,7 @@ ngx_http_auth_digest_verify_nonce(ngx_http_request_t *r, ngx_http_auth_digest_co
                    "auth digest: Client-side nonce: \"%V\"", &auth->nonce);
 
     /* Best-effort constant-time comparison of strings in C */
-    for (n = 0, ch = 0; n < NGX_HTTP_AUTH_DGST_MD5_SIZE; n++) {
+    for (n = 0, ch = 0; n < NGX_HTTP_AUTH_DGST_MAC_SIZE; n++) {
         ch |= nonce->hmac[n] ^ value.hmac[n];
     }
 
@@ -1693,6 +1695,7 @@ ngx_http_auth_digest_close(ngx_file_t *file)
     }
 }
 
+
 static ngx_int_t
 ngx_http_auth_digest_add_variables(ngx_conf_t *cf)
 {
@@ -1707,6 +1710,7 @@ ngx_http_auth_digest_add_variables(ngx_conf_t *cf)
 
     return NGX_OK;
 }
+
 
 static void *
 ngx_http_auth_digest_create_loc_conf(ngx_conf_t *cf)
@@ -1727,7 +1731,7 @@ ngx_http_auth_digest_create_loc_conf(ngx_conf_t *cf)
      * conf->algorithm = 0;
      * conf->realm = NULL;
      * conf->user_file = NULL;
-     * conf->secret_key = NULL;
+     * conf->secret_key = {0, NULL};
      */
 
     conf->expires = NGX_CONF_UNSET;
@@ -1744,10 +1748,8 @@ ngx_http_auth_digest_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_http_auth_digest_conf_t  *prev = parent;
     ngx_http_auth_digest_conf_t  *conf = child;
 
-    ngx_uint_t                        n;
-    u_char                            buf[NGX_HTTP_AUTH_DGST_MD5_SIZE];
-    ngx_str_t                         value;
-    ngx_http_compile_complex_value_t  ccv;
+    ngx_uint_t                    n;
+    ngx_str_t                     value;
 
     if (conf->shm_zone == NULL) {
         conf->shm_zone = prev->shm_zone;
@@ -1761,36 +1763,27 @@ ngx_http_auth_digest_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
         conf->user_file = prev->user_file;
     }
 
-    if (conf->secret_key.value.data == NULL) {
+    if (conf->secret_key.data == NULL) {
 
-        if (prev->secret_key.value.data == NULL) {
+        if (prev->secret_key.data == NULL) {
 
             /* Default value is random key */
             ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
                            "Random secret key for nonce generation created");
 
-            for (n = 0; n < sizeof(buf); n++) {
-                buf[n] = (u_char) ngx_random();
-            }
-
-            value.len = 2 * sizeof(buf);
+            value.len = NGX_HTTP_AUTH_DGST_KEY_SIZE;
 
             value.data = ngx_pcalloc(cf->pool, value.len + 1);
             if (value.data == NULL) {
                 return NGX_CONF_ERROR;
             }
 
-            ngx_hex_dump(value.data, buf, sizeof(buf));
-
-            ngx_memzero(&ccv, sizeof(ngx_http_compile_complex_value_t));
-
-            ccv.cf = cf;
-            ccv.value = &value;
-            ccv.complex_value = &conf->secret_key;
-
-            if (ngx_http_compile_complex_value(&ccv) != NGX_OK) {
-                return NGX_CONF_ERROR;
+            for (n = 0; n < NGX_HTTP_AUTH_DGST_KEY_SIZE; n++) {
+                value.data[n] = (u_char) ngx_random();
             }
+
+            conf->secret_key.len = value.len;
+            conf->secret_key.data = value.data;
 
         } else {
             conf->secret_key = prev->secret_key;
@@ -1828,10 +1821,10 @@ ngx_http_auth_digest_init(ngx_conf_t *cf)
 static char *
 ngx_http_auth_digest_user_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
-    ngx_http_auth_digest_conf_t *adcf = conf;
+    ngx_http_auth_digest_conf_t       *adcf = conf;
 
-    ngx_str_t                        *value;
-    ngx_http_compile_complex_value_t  ccv;
+    ngx_str_t                         *value;
+    ngx_http_compile_complex_value_t   ccv;
 
     if (adcf->user_file.value.data) {
         return "is duplicate";
@@ -1858,26 +1851,31 @@ ngx_http_auth_digest_user_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 static char *
 ngx_http_auth_digest_secret_key(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
-    ngx_http_auth_digest_conf_t *adcf = conf;
+    ngx_http_auth_digest_conf_t  *adcf = conf;
 
-    ngx_str_t                       *value;
-    ngx_http_compile_complex_value_t ccv;
+    ngx_md5_t                     md5;
+    ngx_str_t                    *value, key;
 
-    if (adcf->secret_key.value.data) {
+    if (adcf->secret_key.data) {
         return "is duplicate";
+    }
+
+    key.len = NGX_HTTP_AUTH_DGST_KEY_SIZE;
+
+    key.data = ngx_pcalloc(cf->pool, key.len + 1);
+    if (key.data == NULL) {
+        return NGX_CONF_ERROR;
     }
 
     value = cf->args->elts;
 
-    ngx_memzero(&ccv, sizeof(ngx_http_compile_complex_value_t));
+    /* Convert to 128-bit long binary form by calculating MD5 hash */
+    ngx_md5_init(&md5);
+    ngx_md5_update(&md5, value[1].data, value[1].len);
+    ngx_md5_final(key.data, &md5);
 
-    ccv.cf = cf;
-    ccv.value = &value[1];
-    ccv.complex_value = &adcf->secret_key;
-
-    if (ngx_http_compile_complex_value(&ccv) != NGX_OK) {
-        return NGX_CONF_ERROR;
-    }
+    adcf->secret_key.len = key.len;
+    adcf->secret_key.data = key.data;
 
     return NGX_CONF_OK;
 }
