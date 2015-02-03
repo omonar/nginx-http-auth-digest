@@ -75,8 +75,8 @@
 
 #endif
 
-#define NGX_HTTP_AUTH_DGST_MD5        1
-#define NGX_HTTP_AUTH_DGST_MD5SESS    2
+#define NGX_HTTP_AUTH_DGST_MD5        0
+#define NGX_HTTP_AUTH_DGST_MD5SESS    1
 
 #define NGX_HTTP_AUTH_DGST_MD5_SIZE   16
 #define NGX_HTTP_AUTH_DGST_BUF_SIZE   2048
