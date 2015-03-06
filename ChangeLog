@@ -5,3 +5,7 @@
 * Tue Feb 3 2015
 
     Convert user supplied secret into 128-bit long binary key
+
+* Fri Mar 6 2015
+
+    Use SipHash24 for nonce authentication code.

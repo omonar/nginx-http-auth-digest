@@ -42,6 +42,12 @@
         && (((uint32_t *) m)[1] | 0x20202020) == ((c7 << 24) | (c6 << 16) | (c5 << 8) | c4)       \
         && (m[8] | 0x20) == c8
 
+#define ngx_auth_digest_parse_uint64(p)                                                           \
+    (*(uint64_t *) (p))
+
+#define ngx_auth_digest_store_uint64(p, v)                                                        \
+    ((*(uint64_t *) (p)) = (v))
+
 #else
 
 #define ngx_auth_digest_str2_casecmp(m, c0, c1)                                                   \
@@ -73,7 +79,32 @@
         == ((c7 << 24) |(c6 << 16) | (c5 << 8) | c4)                                              \
         && (m[8] | 0x20) == c8
 
+#define ngx_auth_digest_parse_uint64(p)                                                           \
+  (((uint64_t)((p)[0])      ) | ((uint64_t)((p)[1]) <<  8) | ((uint64_t)((p)[2]) << 16)           \
+    | ((uint64_t)((p)[3]) << 24) | ((uint64_t)((p)[4]) << 32) | ((uint64_t)((p)[5]) << 40)        \
+    | ((uint64_t)((p)[6]) << 48) | ((uint64_t)((p)[7]) << 56))
+
+#define ngx_auth_digest_store_uint64(p, v)                                                        \
+    (p)[0] = (uint8_t)((v)      ); (p)[1] = (uint8_t)((v) >>  8);                                 \
+    (p)[2] = (uint8_t)((v) >> 16); (p)[3] = (uint8_t)((v) >> 24);                                 \
+    (p)[4] = (uint8_t)((v) >> 32); (p)[5] = (uint8_t)((v) >> 40);                                 \
+    (p)[6] = (uint8_t)((v) >> 48); (p)[7] = (uint8_t)((v) >> 56);
+
 #endif
+
+#define ROTL(x,b) (uint64_t)( ((x) << (b)) | ( (x) >> (64 - (b))) )
+
+#define SIPROUND                                                                                  \
+    do {                                                                                          \
+        v0 += v1; v2 += v3;                                                                       \
+        v1 = ROTL(v1,13); v3 = ROTL(v3,16);                                                       \
+        v1 ^= v0; v3 ^= v2;                                                                       \
+        v0 = ROTL(v0,32);                                                                         \
+        v0 += v3; v2 += v1;                                                                       \
+        v3 = ROTL(v3,21); v1 = ROTL(v1,17);                                                       \
+        v3 ^= v0; v1 ^= v2;                                                                       \
+        v2 = ROTL(v2,32);                                                                         \
+    } while(0)
 
 #define NGX_HTTP_AUTH_DGST_MD5        0
 #define NGX_HTTP_AUTH_DGST_MD5SESS    1
@@ -85,8 +116,12 @@
 #define NGX_HTTP_AUTH_DGST_REPLAYS    512
 #define NGX_HTTP_AUTH_DGST_EXPIRES    300
 
+/* SipHash-2-4 */
+#define NGX_HTTP_AUTH_DGST_C_ROUNDS   2
+#define NGX_HTTP_AUTH_DGST_D_ROUNDS   4
+
+#define NGX_HTTP_AUTH_DGST_MAC_SIZE   16
 #define NGX_HTTP_AUTH_DGST_KEY_SIZE   NGX_HTTP_AUTH_DGST_MD5_SIZE
-#define NGX_HTTP_AUTH_DGST_MAC_SIZE   NGX_HTTP_AUTH_DGST_MD5_SIZE
 
 /* Anti-replay window */
 #define NGX_HTTP_AUTH_DGST_ARBV_ELT   8
@@ -136,7 +171,7 @@ typedef struct {
 typedef struct {
     time_t                         expires;
     ngx_uint_t                     unique;
-    u_char                         hmac[NGX_HTTP_AUTH_DGST_MAC_SIZE];
+    u_char                         mac[NGX_HTTP_AUTH_DGST_MAC_SIZE];
 } ngx_http_auth_digest_nonce_t;
 
 
@@ -194,7 +229,7 @@ static uintptr_t ngx_http_auth_digest_generate_nonce(ngx_http_request_t *r,
 static ngx_int_t ngx_http_auth_digest_verify_nonce(ngx_http_request_t *r,
     ngx_http_auth_digest_conf_t *adcf, ngx_http_auth_digest_auth_t *auth,
     ngx_http_auth_digest_nonce_t *nonce);
-static void ngx_http_auth_digest_calculate_hmac(u_char *hash,
+static void ngx_http_auth_digest_calculate_md5hmac(u_char *hash,
     ngx_str_t *message, ngx_str_t *secret_key);
 static uintptr_t ngx_http_auth_digest_escape_string(u_char *dst,
     u_char *src, size_t size);
@@ -231,6 +266,8 @@ static ngx_int_t ngx_http_auth_digest_user_variable(ngx_http_request_t *r,
 #if (NGX_DEBUG)
 static void ngx_http_auth_digest_arbv_status(ngx_http_request_t *r, u_char *arbv);
 #endif
+static void ngx_http_auth_digest_calculate_mac(u_char *hash,
+    ngx_str_t *message, ngx_str_t *secret_key);
 
 static ngx_http_auth_digest_fields_t ngx_http_auth_digest_fields = {
 
@@ -1108,7 +1145,7 @@ ngx_http_auth_digest_crypt_handler(ngx_http_request_t *r,
     }
 
     /* Check if the nonce has already been seen */
-    key.len  = offsetof(ngx_http_auth_digest_nonce_t, hmac)
+    key.len  = offsetof(ngx_http_auth_digest_nonce_t, mac)
              - offsetof(ngx_http_auth_digest_nonce_t, unique);
 
     key.data = (u_char *) &nonce.unique;
@@ -1501,10 +1538,10 @@ ngx_http_auth_digest_generate_nonce(ngx_http_request_t *r, u_char *dst,
         "auth digest: Nonce ident:  \"%08xT:%08xi\"",
          nonce.expires, nonce.unique);
 
-    message.len = offsetof(ngx_http_auth_digest_nonce_t, hmac);
+    message.len = offsetof(ngx_http_auth_digest_nonce_t, mac);
     message.data = (u_char *) &nonce;
 
-    ngx_http_auth_digest_calculate_hmac(nonce.hmac, &message, secret_key);
+    ngx_http_auth_digest_calculate_mac(nonce.mac, &message, secret_key);
 
     base64.data = dst;
 
@@ -1552,7 +1589,7 @@ ngx_http_auth_digest_verify_nonce(ngx_http_request_t *r, ngx_http_auth_digest_co
         return NGX_ABORT;
     }
 
-    message.len = offsetof(ngx_http_auth_digest_nonce_t, hmac);
+    message.len = offsetof(ngx_http_auth_digest_nonce_t, mac);
     message.data = (u_char *) &value;
 
     ngx_memcpy(&value, nonce, message.len);
@@ -1561,7 +1598,7 @@ ngx_http_auth_digest_verify_nonce(ngx_http_request_t *r, ngx_http_auth_digest_co
             "auth digest: Nonce ident:  \"%08xT:%08xi\"",
             value.expires, value.unique);
 
-    ngx_http_auth_digest_calculate_hmac(value.hmac, &message, &adcf->secret_key);
+    ngx_http_auth_digest_calculate_mac(value.mac, &message, &adcf->secret_key);
 
 #if (NGX_DEBUG)
     binary.data = (u_char *) &value;
@@ -1579,7 +1616,7 @@ ngx_http_auth_digest_verify_nonce(ngx_http_request_t *r, ngx_http_auth_digest_co
 
     /* Best-effort constant-time comparison of strings in C */
     for (n = 0, ch = 0; n < NGX_HTTP_AUTH_DGST_MAC_SIZE; n++) {
-        ch |= nonce->hmac[n] ^ value.hmac[n];
+        ch |= nonce->mac[n] ^ value.mac[n];
     }
 
     if (ch != 0) {
@@ -1595,7 +1632,7 @@ ngx_http_auth_digest_verify_nonce(ngx_http_request_t *r, ngx_http_auth_digest_co
 
 
 static void
-ngx_http_auth_digest_calculate_hmac(u_char *hash, ngx_str_t *message,
+ngx_http_auth_digest_calculate_md5hmac(u_char *hash, ngx_str_t *message,
     ngx_str_t *secret_key)
 {
     ngx_md5_t   md5;
@@ -1853,8 +1890,7 @@ ngx_http_auth_digest_secret_key(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_http_auth_digest_conf_t  *adcf = conf;
 
-    ngx_md5_t                     md5;
-    ngx_str_t                    *value, key;
+    ngx_str_t                    *value, key, message;
 
     if (adcf->secret_key.data) {
         return "is duplicate";
@@ -1869,10 +1905,15 @@ ngx_http_auth_digest_secret_key(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     value = cf->args->elts;
 
-    /* Convert to 128-bit long binary form by calculating MD5 hash */
-    ngx_md5_init(&md5);
-    ngx_md5_update(&md5, value[1].data, value[1].len);
-    ngx_md5_final(key.data, &md5);
+    if (value[1].len < 22) {
+        ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                       "For reasonable security secret should be at least 22 characters long");
+    }
+
+    /* Convert secret to 128-bit long binary key by calculating HMAC-MD5 value*/
+    ngx_str_set(&message, "somepseudorandomlygeneratedbytes");
+
+    ngx_http_auth_digest_calculate_md5hmac(key.data, &message, &value[1]);
 
     adcf->secret_key.len = key.len;
     adcf->secret_key.data = key.data;
@@ -2320,3 +2361,83 @@ static void ngx_http_auth_digest_arbv_status(ngx_http_request_t *r, u_char *arbv
                    "auth digest: Anti-replay window %s", &s);
 }
 #endif
+
+
+/*
+ * SipHash reference C implementation
+ *
+ * Copyright (c) 2012-2014 Jean-Philippe Aumasson <jeanphilippe.aumasson@gmail.com>
+ * Copyright (c) 2012-2014 Daniel J. Bernstein <djb@cr.yp.to>
+ */
+
+
+static void
+ngx_http_auth_digest_calculate_mac(u_char *hash, ngx_str_t *message,
+    ngx_str_t *secret_key)
+{
+    u_char      *p, *end;
+    uint64_t     v0, v1, v2, v3, k0, k1, b, m, mask;
+    ngx_uint_t   i, left;
+
+    k0 = ngx_auth_digest_parse_uint64(secret_key->data);
+    k1 = ngx_auth_digest_parse_uint64(secret_key->data
+                                      + sizeof(uint64_t));
+
+    /* "somepseudorandomlygeneratedbytes" */
+    v0 = k0 ^ 0x736f6d6570736575ull;
+    v1 = k1 ^ 0x646f72616e646f6dull;
+    v2 = k0 ^ 0x6c7967656e657261ull;
+    v3 = k1 ^ 0x7465646279746573ull;
+
+#if (NGX_HTTP_AUTH_DGST_MAC_SIZE == 16)
+    v1 ^= 0xee;
+#endif
+
+    left = message->len % sizeof(uint64_t);
+
+    p = message->data;
+    end = p + message->len - left;
+
+    for( ; p != end; p += sizeof(uint64_t)) {
+        m = ngx_auth_digest_parse_uint64(p);
+        v3 ^= m;
+
+        for(i = 0; i < NGX_HTTP_AUTH_DGST_C_ROUNDS; ++i) SIPROUND;
+
+        v0 ^= m;
+    }
+
+    m = ngx_auth_digest_parse_uint64(p);
+
+    mask = left == 0 ? 0 : 0xffffffffffffffffull >> (8 * (8 - left));
+
+    b = ((uint64_t) message->len) << 56;
+
+    b ^= (m & mask);
+
+    v3 ^= b;
+
+    for(i = 0; i < NGX_HTTP_AUTH_DGST_C_ROUNDS; ++i) SIPROUND;
+
+    v0 ^= b;
+
+#if (NGX_HTTP_AUTH_DGST_MAC_SIZE == 16)
+    v2 ^= 0xff;
+#else
+    v2 ^= 0xee;
+#endif
+
+    for(i = 0; i < NGX_HTTP_AUTH_DGST_D_ROUNDS; ++i) SIPROUND;
+
+    b = (v0 ^ v1) ^ (v2  ^ v3);
+    ngx_auth_digest_store_uint64(hash, b);
+
+#if (NGX_HTTP_AUTH_DGST_MAC_SIZE == 16)
+    v1 ^= 0xdd;
+
+    for(i = 0; i < NGX_HTTP_AUTH_DGST_D_ROUNDS; ++i) SIPROUND;
+
+    b = (v0 ^ v1) ^ (v2  ^ v3);
+    ngx_auth_digest_store_uint64(hash + sizeof(uint64_t), b);
+#endif
+}
